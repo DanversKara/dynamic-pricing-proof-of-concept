@@ -1,0 +1,10 @@
+services:
+  pricing:
+    build: ./server
+    container_name: shirt-pricing-demo
+    restart: unless-stopped
+    ports:
+      - "8080:8080"          # web GUI + the endpoint the ESP32 polls
+    env_file: .env
+    volumes:
+      - ./data:/data          # config only: products, profiles, rules, shirt photos

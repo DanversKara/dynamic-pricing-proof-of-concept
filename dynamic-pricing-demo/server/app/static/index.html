@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pricing Demo Console</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand"><span class="dot"></span> Shirt-Color Dynamic Pricing <small>proof of concept</small></div>
+  <nav>
+    <button data-tab="live" class="active">Live</button>
+    <button data-tab="profiles">Customers</button>
+    <button data-tab="products">Products</button>
+    <button data-tab="pricing">Pricing</button>
+    <button data-tab="settings">Camera &amp; Settings</button>
+  </nav>
+</header>
+
+<main>
+  <!-- LIVE -->
+  <section id="tab-live" class="tab active">
+    <div class="grid2">
+      <div class="card">
+        <h2>Price tag right now</h2>
+        <div id="tag" class="eink"></div>
+        <p class="muted small">Mirrors exactly what the ESP32-S3-Box-3 pulls from <code>/api/display</code>.</p>
+      </div>
+      <div class="card">
+        <h2>Detection</h2>
+        <div class="kv"><span>Camera</span><b id="camStatus">…</b></div>
+        <div class="kv"><span>Mode / FPS</span><b id="camFps">…</b></div>
+        <div class="kv"><span>Active profile</span><b id="activeProfile">…</b></div>
+        <div id="scores"></div>
+        <p class="muted small">Bars show how much matching shirt color is in view; the line is the trigger threshold.</p>
+      </div>
+    </div>
+    <div class="grid2">
+      <div class="card">
+        <h2>Simulate a customer</h2>
+        <p class="muted small">Forces a profile for 15 s — handy for filming or testing the tag without the camera.</p>
+        <div id="simButtons" class="btnrow"></div>
+      </div>
+      <div class="card">
+        <h2>Camera preview <small class="muted" id="previewNote"></small></h2>
+        <img id="preview" alt="">
+        <p class="muted small" id="previewHelp">Preview is generated in memory only while this page is open. Never saved.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- PROFILES -->
+  <section id="tab-profiles" class="tab">
+    <div class="toolbar"><h2>Customer profiles (by shirt color)</h2><button id="addProfile" class="primary">+ Add customer</button></div>
+    <div id="profileList" class="cards"></div>
+  </section>
+
+  <!-- PRODUCTS -->
+  <section id="tab-products" class="tab">
+    <div class="toolbar"><h2>Products</h2><button id="addProduct" class="primary">+ Add product</button></div>
+    <div class="card">
+      <table class="tbl">
+        <thead><tr><th>On tag</th><th>Name</th><th>Unit</th><th>Default price (profile E)</th><th></th></tr></thead>
+        <tbody id="productRows"></tbody>
+      </table>
+      <p class="muted small">The default price is what everyone without a matched profile sees.</p>
+    </div>
+  </section>
+
+  <!-- PRICING -->
+  <section id="tab-pricing" class="tab">
+    <div class="toolbar"><h2>Pricing rules</h2>
+      <label>Product <select id="pricingProduct"></select></label></div>
+    <p class="muted small">Final price = base price × each markup (compounded). "Shown discount" invents a higher "was" price so the real price <em>looks</em> discounted. Changes go live on the tag immediately.</p>
+    <div id="ruleList" class="cards"></div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section id="tab-settings" class="tab">
+    <div class="grid2">
+      <div class="card">
+        <h2>Find camera stream (ONVIF)</h2>
+        <div class="form">
+          <label>Camera IP <input id="ovHost" placeholder="192.168.8.50"></label>
+          <label>ONVIF port <input id="ovPort" value="80"></label>
+          <label>Username <input id="ovUser" value="admin"></label>
+          <label>Password <input id="ovPass" type="password"></label>
+        </div>
+        <button id="ovFind">Find streams</button>
+        <div id="ovResult" class="small"></div>
+        <p class="muted small">Tip: pick the lowest-resolution stream (sub-stream). 5 MP is overkill for shirt colors and burns CPU.</p>
+      </div>
+      <div class="card">
+        <h2>Detection settings</h2>
+        <div class="form" id="settingsForm">
+          <label class="wide">Camera RTSP URL <input name="camera_url" placeholder="rtsp://user:pass@192.168.8.50:554/..."></label>
+          <label>Mode
+            <select name="mode">
+              <option value="motion">motion — moving shirt colors in zone (recommended)</option>
+              <option value="person">person — HOG person detector, torso color</option>
+              <option value="zone">zone — any matching color in zone</option>
+            </select></label>
+          <label>Aisle zone x0,y0,x1,y1 <input name="zone" placeholder="0,0,1,1"></label>
+          <label>Hold price after leaving (s) <input name="hold_seconds" type="number" step="0.5"></label>
+          <label>Frames to confirm <input name="confirm_frames" type="number" min="1"></label>
+          <label>Processing FPS <input name="target_fps" type="number" step="1" min="1"></label>
+          <label>Person-mode torso fraction <input name="person_torso_fraction" type="number" step="0.05"></label>
+          <label>GUI preview
+            <select name="preview_mode">
+              <option value="mask">color mask only (no image)</option>
+              <option value="pixelated">heavily pixelated</option>
+              <option value="off">off</option>
+            </select></label>
+          <label>Show "PROFILE X" on tag
+            <select name="show_profile_on_tag"><option value="1">yes</option><option value="0">no</option></select></label>
+        </div>
+        <button id="saveSettings" class="primary">Save settings</button>
+      </div>
+    </div>
+  </section>
+</main>
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>

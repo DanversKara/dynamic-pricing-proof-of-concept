@@ -1,0 +1,378 @@
+########################################################################
+# ESP32-S3-Box-3 — SHIRT-COLOR DYNAMIC PRICING TAG (proof of concept)
+#
+# Built on top of the bootstrap config. All original hardware (battery,
+# USB logging, backlight, mic, speaker, WiFi + fallback AP, Bluetooth
+# proxy, Home Assistant API) is unchanged. Added:
+#
+#   - Polls the Docker pricing server (GET /api/display) every second
+#   - Draws an e-ink-style black & white shelf price tag
+#   - Shows ONLINE / OFFLINE so you can tell the tag is talking to Docker
+#
+# Before flashing:
+#   1. Set `pricing_server` below to the IP of the machine running Docker.
+#   2. Put these in your ESPHome secrets.yaml (see secrets.yaml.example):
+#        wifi_ssid, wifi_password, api_encryption_key, fallback_ap_password
+#      (The API key used to sit in this file — moved to secrets so it
+#       doesn't end up on GitHub.)
+########################################################################
+
+substitutions:
+  name: esp32-s3box-3
+  friendly_name: ESP32-S3-Box-3
+
+  # ── Pricing server (Docker) ─────────────────────────────────────────────
+  # IP:port of the computer running `docker compose up`. Use the IP, not
+  # "localhost" — localhost on the ESP means the ESP itself.
+  pricing_server: http://192.168.8.162:8080
+  product_id: "0"          # 0 = whichever product is marked "On tag" in the web GUI
+
+  # ── Carried over from the old config (unused here, kept for reference) ──
+  external_media_player: living_room_speaker
+  home_assistant_host: http://192.168.8.162:8123
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  name_add_mac_suffix: false
+  min_version: 2026.4.0
+  project:
+    name: "Christian.s3box3"
+    version: "1.1.0"
+
+esp32:
+  board: esp32s3box
+  flash_size: 16MB
+  cpu_frequency: 240MHz
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
+      CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: "y"
+      CONFIG_MBEDTLS_SSL_PROTO_TLS1_3: "y"
+    advanced:
+      execute_from_psram: true
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+# ── USB / logging ───────────────────────────────────────────────────────
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+
+# ── WiFi + fallback AP ──────────────────────────────────────────────────
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: ${name}
+    password: !secret fallback_ap_password
+
+captive_portal:
+
+# ── Home Assistant API ──────────────────────────────────────────────────
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+
+# ── Bluetooth (shows up as a BT proxy in Home Assistant) ───────────────
+esp32_ble_tracker:
+bluetooth_proxy:
+  active: true
+
+# ── HTTP client + JSON (talks to the Docker pricing server) ─────────────
+http_request:
+  verify_ssl: false
+  timeout: 2s
+
+json:
+
+globals:
+  - id: g_product
+    type: std::string
+    initial_value: '"Apple"'
+  - id: g_unit
+    type: std::string
+    initial_value: '"each"'
+  - id: g_price
+    type: std::string
+    initial_value: '"--"'
+  - id: g_was
+    type: std::string
+    initial_value: '""'
+  - id: g_badge
+    type: std::string
+    initial_value: '""'
+  - id: g_tag
+    type: std::string
+    initial_value: '""'
+  - id: g_last_ok
+    type: uint32_t
+    initial_value: "0"
+
+interval:
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - http_request.get:
+                url: ${pricing_server}/api/display?product_id=${product_id}
+                capture_response: true
+                max_response_buffer_size: 2048
+                on_response:
+                  then:
+                    - if:
+                        condition:
+                          lambda: return response->status_code == 200;
+                        then:
+                          - lambda: |-
+                              bool changed = false;
+                              json::parse_json(body, [&](JsonObject root) -> bool {
+                                auto take = [&](std::string &dst, const char *key) {
+                                  std::string v = root[key] | "";
+                                  if (v != dst) { dst = v; changed = true; }
+                                };
+                                take(id(g_product), "product");
+                                take(id(g_unit), "unit");
+                                take(id(g_price), "price");
+                                take(id(g_was), "was");
+                                take(id(g_badge), "badge");
+                                take(id(g_tag), "tag");
+                                return true;
+                              });
+                              bool was_offline = id(g_last_ok) == 0 || millis() - id(g_last_ok) > 5000;
+                              id(g_last_ok) = millis();
+                              if (changed || was_offline) {
+                                ESP_LOGI("pricetag", "Tag now: %s %s (%s)", id(g_product).c_str(),
+                                         id(g_price).c_str(), id(g_tag).c_str());
+                                id(s3_box_lcd).update();
+                              }
+                        else:
+                          - logger.log:
+                              level: WARN
+                              format: "Pricing server returned HTTP %d"
+                              args: ["response->status_code"]
+
+# ── I2C (touch controller + audio codecs live on these) ────────────────
+i2c:
+  - id: bus_a
+    sda: GPIO08
+    scl: GPIO18
+    scan: true
+    frequency: 100kHz
+  - id: bus_b
+    sda: GPIO41
+    scl: GPIO40
+    scan: true
+    frequency: 100kHz
+
+# ── LCD backlight ("the LED") ───────────────────────────────────────────
+output:
+  - platform: ledc
+    pin: GPIO47
+    id: backlight_output
+
+light:
+  - platform: monochromatic
+    id: led
+    name: "LCD Backlight"
+    output: backlight_output
+    restore_mode: ALWAYS_ON
+
+# ── Battery + WiFi diagnostics ──────────────────────────────────────────
+sensor:
+  - platform: adc
+    pin: GPIO10
+    id: battery_voltage
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    device_class: "voltage"
+    entity_category: "diagnostic"
+    update_interval: 30s
+    attenuation: auto
+    filters:
+      - multiply: 4.11
+
+  - platform: copy
+    id: battery_percent
+    source_id: battery_voltage
+    name: "Battery Level"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    device_class: "battery"
+    entity_category: "diagnostic"
+    filters:
+      - lambda: return (x - 2.7) / (4.2 - 2.7) * 100;
+      - clamp:
+          min_value: 0
+          max_value: 100
+
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+
+# ── Audio hardware: mic + speaker drivers (unchanged) ───────────────────
+i2s_audio:
+  - id: audio_bus
+    i2s_lrclk_pin:
+      number: GPIO45
+      ignore_strapping_warning: true
+    i2s_bclk_pin: GPIO17
+    i2s_mclk_pin: GPIO2
+
+audio_adc:
+  - platform: es7210
+    id: es7210_adc
+    i2c_id: bus_a
+    bits_per_sample: 16bit
+    sample_rate: 16000
+
+audio_dac:
+  - platform: es8311
+    id: es8311_dac
+    i2c_id: bus_a
+    bits_per_sample: 16bit
+    sample_rate: 48000
+
+microphone:
+  - platform: i2s_audio
+    id: box_mic
+    sample_rate: 16000
+    i2s_din_pin: GPIO16
+    bits_per_sample: 16bit
+    adc_type: external
+
+switch:
+  - platform: gpio
+    id: speaker_enable
+    pin:
+      number: GPIO46
+      ignore_strapping_warning: true
+    restore_mode: ALWAYS_ON
+
+speaker:
+  - id: i2s_audio_speaker
+    platform: i2s_audio
+    i2s_audio_id: audio_bus
+    i2s_dout_pin: GPIO15
+    dac_type: external
+    sample_rate: 48000
+    bits_per_sample: 16bit
+    channel: mono
+    audio_dac: es8311_dac
+    buffer_duration: 100ms
+
+# ── LCD panel: e-ink style price tag ────────────────────────────────────
+spi:
+  - id: spi_bus
+    clk_pin: 7
+    mosi_pin: 6
+
+font:
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: 500
+    id: f_small
+    size: 13
+    glyphs: ' !"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_|'
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: 700
+    id: f_name
+    size: 32
+    glyphs: ' !"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_|'
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: 400
+    id: f_was
+    size: 20
+    glyphs: "$.,-0123456789"
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: 900
+    id: f_price
+    size: 76
+    glyphs: "$.,-0123456789"
+
+display:
+  - platform: mipi_spi
+    id: s3_box_lcd
+    model: S3BOX
+    data_rate: 40MHz
+    cs_pin: 5
+    dc_pin: 4
+    reset_pin:
+      number: 48
+      inverted: true
+    color_order: bgr
+    invert_colors: false
+    update_interval: 2s
+    lambda: |-
+      // Only two "inks" + one mid-gray: looks like an electronic shelf label.
+      const auto paper = Color(236, 234, 226);
+      const auto ink   = Color(18, 18, 18);
+      const auto gray  = Color(110, 110, 105);
+      const int W = it.get_width();    // 320
+      const int H = it.get_height();   // 240
+
+      it.fill(paper);
+      it.rectangle(0, 0, W, H, ink);
+      it.rectangle(1, 1, W - 2, H - 2, ink);
+
+      // Header strip
+      it.filled_rectangle(0, 0, W, 24, ink);
+      it.print(10, 12, id(f_small), paper, TextAlign::CENTER_LEFT, "FRESH PRODUCE");
+      it.printf(W - 10, 12, id(f_small), paper, TextAlign::CENTER_RIGHT, "%s", id(g_tag).c_str());
+
+      // Product name + unit
+      it.printf(12, 30, id(f_name), ink, TextAlign::TOP_LEFT, "%s", id(g_product).c_str());
+      it.printf(13, 66, id(f_small), gray, TextAlign::TOP_LEFT, "%s", id(g_unit).c_str());
+      it.horizontal_line(12, 86, W - 24, gray);
+
+      // Badge (inverted box), e.g. "EMPLOYEE PRICE -20%"
+      if (!id(g_badge).empty()) {
+        int bx, by, bw, bh;
+        it.get_text_bounds(18, 98, id(g_badge).c_str(), id(f_small), TextAlign::TOP_LEFT, &bx, &by, &bw, &bh);
+        it.filled_rectangle(12, 94, bw + 12, bh + 8, ink);
+        it.printf(18, 98, id(f_small), paper, TextAlign::TOP_LEFT, "%s", id(g_badge).c_str());
+      }
+
+      // Struck-through "was" price
+      if (!id(g_was).empty()) {
+        int wx, wy, ww, wh;
+        it.get_text_bounds(W - 12, 94, id(g_was).c_str(), id(f_was), TextAlign::TOP_RIGHT, &wx, &wy, &ww, &wh);
+        it.printf(W - 12, 94, id(f_was), gray, TextAlign::TOP_RIGHT, "%s", id(g_was).c_str());
+        it.line(wx - 2, wy + wh / 2, wx + ww + 2, wy + wh / 2, ink);
+        it.line(wx - 2, wy + wh / 2 + 1, wx + ww + 2, wy + wh / 2 + 1, ink);
+      }
+
+      // The price
+      it.printf(W - 12, 196, id(f_price), ink, TextAlign::BASELINE_RIGHT, "%s", id(g_price).c_str());
+
+      // Footer: decorative barcode + connection status
+      static const uint8_t bars[] = {2,1,1,3,1,2,2,1,3,1,1,2,1,1,2,3,1,2,1,1,2,1,3,1,1,2,2,1};
+      int x = 12;
+      for (size_t i = 0; i < sizeof(bars); i++) {
+        if (i % 2 == 0) it.filled_rectangle(x, 208, bars[i], 22, ink);
+        x += bars[i] + 1;
+      }
+      const char *status;
+      if (id(g_last_ok) == 0) status = "CONNECTING";
+      else if (millis() - id(g_last_ok) > 5000) status = "OFFLINE";
+      else status = "ONLINE";
+      it.print(W - 12, 230, id(f_small), ink, TextAlign::BOTTOM_RIGHT, status);
